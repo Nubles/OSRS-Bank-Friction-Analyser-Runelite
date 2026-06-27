@@ -35,6 +35,20 @@ public class BankFrictionAnalyserTest
 	}
 
 	@Test
+	public void startingANewSessionFinishesThePreviousSession()
+	{
+		BankFrictionAnalyser analyser = new BankFrictionAnalyser();
+
+		analyser.recordSessionStart(START);
+		analyser.recordWithdraw(1, "Item 1", START + 1_000L);
+		analyser.recordSessionStart(START + 10_000L);
+		analyser.recordWithdraw(2, "Item 2", START + 11_000L);
+
+		assertEquals(2, analyser.snapshot().getSessions().size());
+		assertEquals(START + 1_000L, analyser.snapshot().getSessions().get(0).getEndMillis());
+	}
+
+	@Test
 	public void recommendsRepeatedSearches()
 	{
 		BankFrictionAnalyser analyser = new BankFrictionAnalyser();
@@ -66,6 +80,25 @@ public class BankFrictionAnalyserTest
 		BankFrictionRecommendation recommendation = find(recommendations, BankFrictionRecommendationType.SLOW_LOADOUT);
 		assertEquals(120, recommendation.getSeconds());
 		assertTrue(recommendation.getDescription().contains("took about 120 seconds"));
+	}
+
+	@Test
+	public void doesNotTreatOrdinaryNumberedItemNamesAsNearDuplicates()
+	{
+		BankFrictionAnalyser analyser = new BankFrictionAnalyser();
+
+		analyser.recordSessionStart(START);
+		analyser.recordWithdraw(10, "Item 10", START + 1_000L);
+		analyser.recordWithdraw(20, "Item 20", START + 2_000L);
+		analyser.recordWithdraw(30, "Item 30", START + 3_000L);
+		analyser.recordSessionEnd(START + 4_000L);
+
+		List<BankFrictionRecommendation> recommendations = analyser.buildRecommendations(START + 5_000L);
+
+		for (BankFrictionRecommendation recommendation : recommendations)
+		{
+			assertFalse(recommendation.getType() == BankFrictionRecommendationType.NEAR_DUPLICATE);
+		}
 	}
 
 	@Test

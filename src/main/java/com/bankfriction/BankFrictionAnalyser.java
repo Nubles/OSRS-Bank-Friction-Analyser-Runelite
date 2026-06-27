@@ -39,12 +39,14 @@ public class BankFrictionAnalyser
 
 	public void recordSessionStart(long timeMillis)
 	{
-		if (currentSession == null)
+		if (currentSession != null)
 		{
-			currentSession = new BankFrictionSession(timeMillis);
-			snapshot.getSessions().add(currentSession);
-			trimHistory();
+			currentSession.finish(lastInteractionTime(currentSession));
 		}
+
+		currentSession = new BankFrictionSession(timeMillis);
+		snapshot.getSessions().add(currentSession);
+		trimHistory();
 	}
 
 	public void recordSessionEnd(long timeMillis)
@@ -73,7 +75,7 @@ public class BankFrictionAnalyser
 
 	public void recordTabSwitch(long timeMillis)
 	{
-		recordSessionStart(timeMillis);
+		ensureSessionStarted(timeMillis);
 		currentSession.addInteraction(new BankFrictionInteraction(
 			BankFrictionInteractionType.TAB_SWITCH, -1, "Bank tab", timeMillis));
 	}
@@ -110,6 +112,26 @@ public class BankFrictionAnalyser
 		return snapshot;
 	}
 
+	private void ensureSessionStarted(long timeMillis)
+	{
+		if (currentSession == null)
+		{
+			currentSession = new BankFrictionSession(timeMillis);
+			snapshot.getSessions().add(currentSession);
+			trimHistory();
+		}
+	}
+
+	private static long lastInteractionTime(BankFrictionSession session)
+	{
+		long timeMillis = session.getStartMillis();
+		for (BankFrictionInteraction interaction : session.getInteractions())
+		{
+			timeMillis = Math.max(timeMillis, interaction.getTimeMillis());
+		}
+		return timeMillis;
+	}
+
 	private void trimHistory()
 	{
 		while (snapshot.getSessions().size() > MAX_SESSIONS)
@@ -130,7 +152,7 @@ public class BankFrictionAnalyser
 			return;
 		}
 
-		recordSessionStart(timeMillis);
+		ensureSessionStarted(timeMillis);
 		String safeName = itemName == null || itemName.trim().isEmpty()
 			? "Item " + itemId
 			: itemName.trim();
@@ -444,7 +466,7 @@ public class BankFrictionAnalyser
 	{
 		String base = itemName == null ? "" : itemName;
 		base = base.replaceAll("\\([0-9]+\\)", "");
-		base = base.replaceAll("\\+?[0-9]+$", "");
+		base = base.replaceAll("\\+[0-9]+$", "");
 		base = base.replaceAll("\\s+", " ").trim();
 		return base.isEmpty() ? "item" : base;
 	}

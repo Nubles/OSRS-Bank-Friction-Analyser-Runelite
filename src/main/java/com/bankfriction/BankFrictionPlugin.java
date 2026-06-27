@@ -7,8 +7,13 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.util.List;
 import javax.inject.Inject;
+import net.runelite.api.Client;
+import net.runelite.api.VarClientStr;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.events.VarClientStrChanged;
+import net.runelite.api.widgets.InterfaceID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -28,6 +33,9 @@ public class BankFrictionPlugin extends Plugin
 	private static final long SAVE_INTERVAL_MILLIS = 60_000L;
 
 	@Inject
+	private Client client;
+
+	@Inject
 	private ClientToolbar clientToolbar;
 
 	@Inject
@@ -41,6 +49,7 @@ public class BankFrictionPlugin extends Plugin
 	private NavigationButton navigationButton;
 	private long lastInteractionMillis;
 	private long lastSaveMillis;
+	private String pendingSearchText = "";
 
 	@Provides
 	BankFrictionConfig provideConfig(ConfigManager configManager)
@@ -68,6 +77,7 @@ public class BankFrictionPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		recordPendingSearch(System.currentTimeMillis());
 		persist();
 		if (navigationButton != null)
 		{
@@ -81,7 +91,7 @@ public class BankFrictionPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
-		if (!config.collectBehaviorData() || analyser == null)
+		if (!config.collectBehaviorData() || analyser == null || !isBankOpen())
 		{
 			return;
 		}
@@ -100,11 +110,6 @@ public class BankFrictionPlugin extends Plugin
 			analyser.recordDeposit(event.getItemId(), target, now);
 			recordInteraction(now);
 		}
-		else if (isBankSearchOption(option, target))
-		{
-			analyser.recordSearch(target.isEmpty() ? "bank search" : target, now);
-			recordInteraction(now);
-		}
 		else if (isManualRepositionOption(option))
 		{
 			analyser.recordManualReposition(event.getItemId(), target, now);
@@ -118,6 +123,22 @@ public class BankFrictionPlugin extends Plugin
 	}
 
 	@Subscribe
+	public void onVarClientStrChanged(VarClientStrChanged event)
+	{
+		if (!config.collectBehaviorData() || analyser == null || event.getIndex() != VarClientStr.INPUT_TEXT || !isBankOpen())
+		{
+			return;
+		}
+
+		String searchText = clean(client.getVarcStrValue(VarClientStr.INPUT_TEXT));
+		if (!searchText.isEmpty())
+		{
+			pendingSearchText = searchText;
+			recordInteraction(System.currentTimeMillis());
+		}
+	}
+
+	@Subscribe
 	public void onGameTick(GameTick event)
 	{
 		if (analyser == null)
@@ -126,8 +147,14 @@ public class BankFrictionPlugin extends Plugin
 		}
 
 		long now = System.currentTimeMillis();
+		if (!isBankOpen())
+		{
+			recordPendingSearch(now);
+		}
+
 		if (lastInteractionMillis > 0L && now - lastInteractionMillis > SESSION_IDLE_TIMEOUT_MILLIS)
 		{
+			recordPendingSearch(lastInteractionMillis);
 			analyser.recordSessionEnd(lastInteractionMillis);
 			lastInteractionMillis = 0L;
 			refreshPanel();
@@ -147,6 +174,15 @@ public class BankFrictionPlugin extends Plugin
 			lastSaveMillis = now;
 		}
 		refreshPanel();
+	}
+
+	private void recordPendingSearch(long now)
+	{
+		if (!pendingSearchText.isEmpty())
+		{
+			analyser.recordSearch(pendingSearchText, now);
+			pendingSearchText = "";
+		}
 	}
 
 	private void refreshPanel()
@@ -182,9 +218,10 @@ public class BankFrictionPlugin extends Plugin
 		return option.startsWith("Deposit");
 	}
 
-	private static boolean isBankSearchOption(String option, String target)
+	private boolean isBankOpen()
 	{
-		return option.equals("Search") && target.toLowerCase().contains("bank");
+		Widget bank = client.getWidget(InterfaceID.BANK, 1);
+		return bank != null && !bank.isHidden();
 	}
 
 	private static boolean isManualRepositionOption(String option)
