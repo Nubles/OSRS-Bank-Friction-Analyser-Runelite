@@ -3,7 +3,7 @@ package com.bankfriction;
 import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 
-public class BankFrictionPluginTest
+public class BankFrictionPluginRunner
 {
 	public static void main(String[] args) throws Exception
 	{

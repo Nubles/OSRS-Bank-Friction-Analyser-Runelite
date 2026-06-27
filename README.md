@@ -40,7 +40,7 @@ gradle test
 Run in RuneLite developer mode from an IDE by launching:
 
 ```text
-com.bankfriction.BankFrictionPluginTest
+com.bankfriction.BankFrictionPluginRunner
 ```
 
 ## Notes

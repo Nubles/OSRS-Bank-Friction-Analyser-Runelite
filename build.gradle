@@ -14,13 +14,20 @@ repositories {
 }
 
 def runeLiteVersion = 'latest.release'
-def pluginMainClass = 'com.bankfriction.BankFrictionPluginTest'
+def pluginMainClass = 'com.bankfriction.BankFrictionPluginRunner'
+
+sourceSets {
+    dev {
+        java.srcDir 'src/dev/java'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += output + compileClasspath
+    }
+}
 
 dependencies {
     compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
-    testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
+    devImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
+    devImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
 }
 
 group = 'com.bankfriction'
@@ -31,27 +38,23 @@ tasks.withType(JavaCompile).configureEach {
     options.release.set(11)
 }
 
-test {
-    useJUnit()
-}
-
 tasks.register('run', JavaExec) {
-    classpath = sourceSets.test.runtimeClasspath
+    classpath = sourceSets.dev.runtimeClasspath
     mainClass = pluginMainClass
     jvmArgs '-ea'
     args '--developer-mode', '--debug'
 }
 
 tasks.register('shadowJar', Jar) {
-    dependsOn configurations.testRuntimeClasspath
+    dependsOn configurations.devRuntimeClasspath
     manifest {
         attributes('Main-Class': pluginMainClass, 'Multi-Release': true)
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from sourceSets.main.output
-    from sourceSets.test.output
+    from sourceSets.dev.output
     from {
-        configurations.testRuntimeClasspath.collect { file ->
+        configurations.devRuntimeClasspath.collect { file ->
             file.isDirectory() ? file : zipTree(file)
         }
     }
