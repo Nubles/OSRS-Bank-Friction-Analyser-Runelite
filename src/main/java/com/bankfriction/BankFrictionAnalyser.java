@@ -21,20 +21,27 @@ public class BankFrictionAnalyser
 	private static final int MIN_NEAR_DUPLICATES = 3;
 	private static final int MIN_MANUAL_REPOSITIONS = 3;
 	private static final int MIN_TAB_SWITCHES = 5;
-	private static final int MAX_SESSIONS = 75;
+	private static final int DEFAULT_MAX_SESSIONS = 75;
 	private static final int MAX_SEARCHES = 150;
 
 	private final BankFrictionSnapshot snapshot;
+	private int maxSessions;
 	private BankFrictionSession currentSession;
 
 	public BankFrictionAnalyser()
 	{
-		this(new BankFrictionSnapshot());
+		this(new BankFrictionSnapshot(), DEFAULT_MAX_SESSIONS);
 	}
 
 	public BankFrictionAnalyser(BankFrictionSnapshot snapshot)
 	{
+		this(snapshot, DEFAULT_MAX_SESSIONS);
+	}
+
+	public BankFrictionAnalyser(BankFrictionSnapshot snapshot, int maxSessions)
+	{
 		this.snapshot = snapshot == null ? new BankFrictionSnapshot() : snapshot;
+		setMaxSessions(maxSessions);
 	}
 
 	public void recordSessionStart(long timeMillis)
@@ -112,6 +119,12 @@ public class BankFrictionAnalyser
 		return snapshot;
 	}
 
+	public void setMaxSessions(int maxSessions)
+	{
+		this.maxSessions = Math.max(1, maxSessions);
+		trimHistory();
+	}
+
 	private void ensureSessionStarted(long timeMillis)
 	{
 		if (currentSession == null)
@@ -134,7 +147,7 @@ public class BankFrictionAnalyser
 
 	private void trimHistory()
 	{
-		while (snapshot.getSessions().size() > MAX_SESSIONS)
+		while (snapshot.getSessions().size() > maxSessions)
 		{
 			snapshot.getSessions().remove(0);
 		}

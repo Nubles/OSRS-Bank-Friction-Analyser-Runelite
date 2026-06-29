@@ -5,9 +5,11 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.util.Collections;
 import java.util.List;
 import javax.inject.Inject;
 import net.runelite.api.Client;
+import net.runelite.api.ItemComposition;
 import net.runelite.api.VarClientStr;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuOptionClicked;
@@ -16,10 +18,12 @@ import net.runelite.api.widgets.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 
 @PluginDescriptor(
 	name = "Bank Friction Analyser",
@@ -42,14 +46,24 @@ public class BankFrictionPlugin extends Plugin
 	private ConfigManager configManager;
 
 	@Inject
+	private OverlayManager overlayManager;
+
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
 	private BankFrictionConfig config;
 
 	private BankFrictionAnalyser analyser;
 	private BankFrictionPanel panel;
+	private BankFrictionOverlay overlay;
 	private NavigationButton navigationButton;
+	private BankFrictionRecommendation selectedRecommendation;
 	private long lastInteractionMillis;
 	private long lastSaveMillis;
 	private String pendingSearchText = "";
+	private boolean bankOpen;
+	private boolean sessionActive;
 
 	@Provides
 	BankFrictionConfig provideConfig(ConfigManager configManager)
@@ -62,8 +76,10 @@ public class BankFrictionPlugin extends Plugin
 	{
 		BankFrictionSnapshot snapshot = BankFrictionStorage.deserialize(
 			configManager.getConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY));
-		analyser = new BankFrictionAnalyser(snapshot);
-		panel = new BankFrictionPanel();
+		analyser = new BankFrictionAnalyser(snapshot, config.maximumRetainedSessions());
+		overlay = new BankFrictionOverlay(config);
+		overlayManager.add(overlay);
+		panel = new BankFrictionPanel(this::selectRecommendation, this::clearHistory);
 		navigationButton = NavigationButton.builder()
 			.tooltip("Bank Friction Analyser")
 			.icon(createIcon())
@@ -71,6 +87,12 @@ public class BankFrictionPlugin extends Plugin
 			.panel(panel)
 			.build();
 		clientToolbar.addNavigation(navigationButton);
+
+		bankOpen = isBankOpen();
+		if (bankOpen && config.collectBehaviorData())
+		{
+			startBankSession(System.currentTimeMillis());
+		}
 		refreshPanel();
 	}
 
@@ -79,13 +101,21 @@ public class BankFrictionPlugin extends Plugin
 	{
 		recordPendingSearch(System.currentTimeMillis());
 		persist();
+		if (overlay != null)
+		{
+			overlayManager.remove(overlay);
+		}
 		if (navigationButton != null)
 		{
 			clientToolbar.removeNavigation(navigationButton);
 		}
 		panel = null;
+		overlay = null;
 		navigationButton = null;
+		selectedRecommendation = null;
 		analyser = null;
+		bankOpen = false;
+		sessionActive = false;
 	}
 
 	@Subscribe
@@ -98,21 +128,22 @@ public class BankFrictionPlugin extends Plugin
 
 		String option = clean(event.getMenuOption());
 		String target = clean(event.getMenuTarget());
+		String itemName = resolveItemName(event.getItemId(), target);
 		long now = System.currentTimeMillis();
 
 		if (isWithdrawOption(option))
 		{
-			analyser.recordWithdraw(event.getItemId(), target, now);
+			analyser.recordWithdraw(event.getItemId(), itemName, now);
 			recordInteraction(now);
 		}
 		else if (isDepositOption(option))
 		{
-			analyser.recordDeposit(event.getItemId(), target, now);
+			analyser.recordDeposit(event.getItemId(), itemName, now);
 			recordInteraction(now);
 		}
 		else if (isManualRepositionOption(option))
 		{
-			analyser.recordManualReposition(event.getItemId(), target, now);
+			analyser.recordManualReposition(event.getItemId(), itemName, now);
 			recordInteraction(now);
 		}
 		else if (isTabSwitchOption(option, target))
@@ -147,15 +178,22 @@ public class BankFrictionPlugin extends Plugin
 		}
 
 		long now = System.currentTimeMillis();
-		if (!isBankOpen())
+		boolean currentlyBankOpen = isBankOpen();
+		if (currentlyBankOpen && !bankOpen && config.collectBehaviorData())
 		{
-			recordPendingSearch(now);
+			startBankSession(now);
 		}
+		else if (!currentlyBankOpen && bankOpen)
+		{
+			endBankSession(now);
+		}
+		bankOpen = currentlyBankOpen;
 
-		if (lastInteractionMillis > 0L && now - lastInteractionMillis > SESSION_IDLE_TIMEOUT_MILLIS)
+		if (sessionActive && lastInteractionMillis > 0L && now - lastInteractionMillis > SESSION_IDLE_TIMEOUT_MILLIS)
 		{
 			recordPendingSearch(lastInteractionMillis);
 			analyser.recordSessionEnd(lastInteractionMillis);
+			sessionActive = false;
 			lastInteractionMillis = 0L;
 			refreshPanel();
 			persist();
@@ -166,8 +204,36 @@ public class BankFrictionPlugin extends Plugin
 		}
 	}
 
+	private void startBankSession(long now)
+	{
+		if (!sessionActive)
+		{
+			analyser.recordSessionStart(now);
+			sessionActive = true;
+		}
+		lastInteractionMillis = now;
+	}
+
+	private void endBankSession(long now)
+	{
+		recordPendingSearch(now);
+		if (sessionActive)
+		{
+			analyser.recordSessionEnd(now);
+		}
+		sessionActive = false;
+		lastInteractionMillis = 0L;
+		refreshPanel();
+		persist();
+	}
+
 	private void recordInteraction(long now)
 	{
+		if (!sessionActive)
+		{
+			analyser.recordSessionStart(now);
+			sessionActive = true;
+		}
 		lastInteractionMillis = now;
 		if (lastSaveMillis == 0L)
 		{
@@ -192,8 +258,11 @@ public class BankFrictionPlugin extends Plugin
 			return;
 		}
 
+		analyser.setMaxSessions(config.maximumRetainedSessions());
 		List<BankFrictionRecommendation> recommendations = analyser.buildRecommendations(System.currentTimeMillis());
-		panel.updateRecommendations(recommendations);
+		selectedRecommendation = selectBestAvailableRecommendation(recommendations, selectedRecommendation);
+		panel.updateRecommendations(recommendations, selectedRecommendation, highlightStatus(selectedRecommendation));
+		updateOverlay();
 	}
 
 	private void persist()
@@ -206,6 +275,122 @@ public class BankFrictionPlugin extends Plugin
 				BankFrictionStorage.serialize(analyser.snapshot()));
 			lastSaveMillis = System.currentTimeMillis();
 		}
+	}
+
+	private void clearHistory()
+	{
+		configManager.unsetConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY);
+		analyser = new BankFrictionAnalyser(new BankFrictionSnapshot(), config.maximumRetainedSessions());
+		selectedRecommendation = null;
+		pendingSearchText = "";
+		lastInteractionMillis = 0L;
+		lastSaveMillis = 0L;
+		sessionActive = false;
+		bankOpen = isBankOpen();
+		if (bankOpen && config.collectBehaviorData())
+		{
+			startBankSession(System.currentTimeMillis());
+		}
+		refreshPanel();
+	}
+
+	private void selectRecommendation(BankFrictionRecommendation recommendation)
+	{
+		selectedRecommendation = recommendation;
+		updateOverlay();
+	}
+
+	private void updateOverlay()
+	{
+		if (overlay == null)
+		{
+			return;
+		}
+
+		if (selectedRecommendation == null)
+		{
+			overlay.setHighlightedItemIds(Collections.emptyList());
+		}
+		else
+		{
+			overlay.setHighlightedItemIds(selectedRecommendation.getItemIds());
+		}
+	}
+
+	private String highlightStatus(BankFrictionRecommendation recommendation)
+	{
+		if (recommendation == null || recommendation.getItemIds().isEmpty())
+		{
+			return "";
+		}
+		if (!config.showPassiveHighlights())
+		{
+			return "Passive highlights are disabled in plugin settings.";
+		}
+		if (!bankOpen)
+		{
+			return "Open the bank to see passive item highlights.";
+		}
+		return "Visible matching bank items are highlighted when present.";
+	}
+
+	private String resolveItemName(int itemId, String fallback)
+	{
+		String cleanedFallback = clean(fallback);
+		if (itemId <= 0)
+		{
+			return cleanedFallback;
+		}
+
+		try
+		{
+			ItemComposition itemComposition = itemManager.getItemComposition(itemManager.canonicalize(itemId));
+			String name = clean(itemComposition.getName());
+			if (!name.isEmpty() && !name.equalsIgnoreCase("null"))
+			{
+				return name;
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			return cleanedFallback;
+		}
+
+		return cleanedFallback;
+	}
+
+	private static BankFrictionRecommendation selectBestAvailableRecommendation(
+		List<BankFrictionRecommendation> recommendations,
+		BankFrictionRecommendation selectedRecommendation)
+	{
+		for (BankFrictionRecommendation recommendation : recommendations)
+		{
+			if (sameRecommendation(recommendation, selectedRecommendation))
+			{
+				return recommendation;
+			}
+		}
+
+		for (BankFrictionRecommendation recommendation : recommendations)
+		{
+			if (!recommendation.getItemIds().isEmpty())
+			{
+				return recommendation;
+			}
+		}
+
+		return null;
+	}
+
+	private static boolean sameRecommendation(
+		BankFrictionRecommendation left,
+		BankFrictionRecommendation right)
+	{
+		return left != null
+			&& right != null
+			&& left.getType() == right.getType()
+			&& left.getTitle().equals(right.getTitle())
+			&& left.getItemIds().equals(right.getItemIds());
 	}
 
 	private static boolean isWithdrawOption(String option)
