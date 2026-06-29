@@ -29,20 +29,6 @@ It does not:
 
 The recommendations are displayed in a standard RuneLite side panel. The player remains responsible for any bank organization changes.
 
-## Development
-
-Run the unit tests:
-
-```bash
-gradle test
-```
-
-Run in RuneLite developer mode from an IDE by launching:
-
-```text
-com.bankfriction.BankFrictionPluginRunner
-```
-
 ## Notes
 
 RuneLite exposes menu interactions reliably, but exact bank search text and drag semantics can vary by client UI path. The analyser supports exact search terms and manual reposition events; the plugin records conservative menu-action signals rather than using private client internals.
