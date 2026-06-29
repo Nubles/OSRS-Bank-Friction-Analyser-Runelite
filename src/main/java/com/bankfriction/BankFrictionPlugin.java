@@ -1,5 +1,6 @@
 package com.bankfriction;
 
+import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -54,6 +55,9 @@ public class BankFrictionPlugin extends Plugin
 	@Inject
 	private BankFrictionConfig config;
 
+	@Inject
+	private Gson gson;
+
 	private BankFrictionAnalyser analyser;
 	private BankFrictionPanel panel;
 	private BankFrictionOverlay overlay;
@@ -75,7 +79,7 @@ public class BankFrictionPlugin extends Plugin
 	protected void startUp()
 	{
 		BankFrictionSnapshot snapshot = BankFrictionStorage.deserialize(
-			configManager.getConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY));
+			gson, configManager.getConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY));
 		analyser = new BankFrictionAnalyser(snapshot, config.maximumRetainedSessions());
 		overlay = new BankFrictionOverlay(config);
 		overlayManager.add(overlay);
@@ -272,7 +276,7 @@ public class BankFrictionPlugin extends Plugin
 			configManager.setConfiguration(
 				BankFrictionConfig.GROUP,
 				STORAGE_KEY,
-				BankFrictionStorage.serialize(analyser.snapshot()));
+				BankFrictionStorage.serialize(gson, analyser.snapshot()));
 			lastSaveMillis = System.currentTimeMillis();
 		}
 	}
