@@ -93,13 +93,13 @@ class VisitRow extends JComponent
 		{
 			parts.add(visit.searches() + (visit.searches() == 1 ? " search" : " searches"));
 		}
-		if (visit.deepWithdrawals() > 0)
-		{
-			parts.add(Format.plural(visit.deepWithdrawals(), "scroll"));
-		}
 		if (visit.putBackCount() > 0)
 		{
 			parts.add(visit.putBackCount() + " put back");
+		}
+		if (visit.deepWithdrawals() > 0)
+		{
+			parts.add(Format.plural(visit.deepWithdrawals(), "scroll"));
 		}
 		if (parts.isEmpty())
 		{

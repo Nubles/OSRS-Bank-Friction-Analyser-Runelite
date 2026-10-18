@@ -14,6 +14,7 @@ import java.awt.GridLayout;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.BiConsumer;
 import javax.swing.JComponent;
 import javax.swing.JOptionPane;
@@ -381,8 +382,8 @@ public class FrictionPanel extends PluginPanel
 		stats.setOpaque(false);
 		stats.add(new StatTile(Format.seconds(loadout.getUsualMillis()), "Usual", "gear-up", Theme.TEXT));
 		stats.add(new StatTile(Format.seconds(loadout.getBestMillis()), "Best", "so far", Theme.GREEN));
-		String tabsValue = loadout.getTabs() > 0 ? String.valueOf(loadout.getTabs()) : "-";
-		stats.add(new StatTile(tabsValue, "Tabs", oneDecimal(loadout.getTabSwitches()) + " hops", loadout.getTabs() >= 2 ? Theme.EMBER : Theme.TEXT));
+		String tabs = loadout.getTabs() > 0 ? Format.plural(loadout.getTabs(), "tab") : "";
+		stats.add(new StatTile(oneDecimal(loadout.getTabSwitches()), "Hops", tabs, loadout.getTabs() >= 2 ? Theme.EMBER : Theme.TEXT));
 		card.add(stats, BorderLayout.SOUTH);
 		card.onClick(() -> toggle(loadout.key(), loadout.getName(), loadout.getItems()));
 		return card;
@@ -433,7 +434,7 @@ public class FrictionPanel extends PluginPanel
 
 	private static String oneDecimal(double value)
 	{
-		return String.format("%.1f", value);
+		return String.format(Locale.ROOT, "%.1f", value);
 	}
 
 	static Card note(String title, String text)

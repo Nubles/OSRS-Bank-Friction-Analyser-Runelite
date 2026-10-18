@@ -149,7 +149,7 @@ public class Crest extends JComponent
 		int room = w - tx - 8;
 		g.setFont(Theme.small());
 		FontMetrics small = g.getFontMetrics();
-		String heading = (player != null ? player + "  -  " : "") + "BANK FRICTION";
+		String heading = (player != null ? player + "  -  " : "") + "FRICTION";
 		g.setColor(Theme.TEXT_MUTED);
 		g.drawString(Ui.clip(heading, small, room), tx, 22);
 
