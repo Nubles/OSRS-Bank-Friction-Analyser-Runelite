@@ -1,69 +1,111 @@
 package com.bankfriction;
 
+import com.bankfriction.core.Analysis;
+import com.bankfriction.core.Journal;
+import com.bankfriction.core.Legacy;
+import com.bankfriction.core.Recorder;
+import com.bankfriction.core.Report;
+import com.bankfriction.overlay.BankHighlight;
+import com.bankfriction.ui.FrictionPanel;
+import com.bankfriction.ui.ItemIcons;
+import com.bankfriction.ui.Sigil;
+import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import com.google.inject.Provides;
-import java.awt.Color;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.image.BufferedImage;
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.ItemComposition;
-import net.runelite.api.VarClientStr;
+import net.runelite.api.Player;
+import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.VarClientStrChanged;
-import net.runelite.api.widgets.InterfaceID;
+import net.runelite.api.events.VarbitChanged;
+import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarClientID;
+import net.runelite.api.gameval.VarbitID;
+import net.runelite.api.vars.InputType;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.AsyncBufferedImage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @PluginDescriptor(
 	name = "Bank Friction Analyser",
-	description = "Analyses bank interaction habits locally and recommends lower-friction item organization.",
-	tags = {"bank", "analytics", "organizer", "loadout"}
+	description = "Finds what slows your banking down (tab hopping, searching, scrolling, misclicks) and shows what to move, gather or tag",
+	tags = {"bank", "analytics", "organizer", "organiser", "loadout", "gear", "layout", "tags"}
 )
 public class BankFrictionPlugin extends Plugin
 {
-	private static final String STORAGE_KEY = "snapshot";
-	private static final long SESSION_IDLE_TIMEOUT_MILLIS = 90_000L;
-	private static final long SAVE_INTERVAL_MILLIS = 60_000L;
+	private static final Logger log = LoggerFactory.getLogger(BankFrictionPlugin.class);
+	private static final String JOURNAL_KEY = "journal";
+	/** Where the first version kept every account's history together. */
+	private static final String LEGACY_KEY = "snapshot";
+	/** Ticks between saves while something has changed, about half a minute. */
+	private static final int SAVE_TICKS = 50;
+	/** Bank items are laid out on a 36 pixel grid. */
+	private static final int ROW_HEIGHT = 36;
 
 	@Inject
 	private Client client;
 
 	@Inject
-	private ClientToolbar clientToolbar;
+	private ClientThread clientThread;
 
 	@Inject
-	private ConfigManager configManager;
+	private ClientToolbar clientToolbar;
 
 	@Inject
 	private OverlayManager overlayManager;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private ItemManager itemManager;
+
+	@Inject
+	private Gson gson;
 
 	@Inject
 	private BankFrictionConfig config;
 
-	private BankFrictionAnalyser analyser;
-	private BankFrictionPanel panel;
-	private BankFrictionOverlay overlay;
-	private NavigationButton navigationButton;
-	private BankFrictionRecommendation selectedRecommendation;
-	private long lastInteractionMillis;
-	private long lastSaveMillis;
-	private String pendingSearchText = "";
+	private final BankHighlight highlight = new BankHighlight();
+
+	private FrictionPanel panel;
+	private NavigationButton navButton;
+
+	private String profile;
+	private Recorder recorder;
 	private boolean bankOpen;
-	private boolean sessionActive;
+	private boolean searching;
+	private boolean unsaved;
+	private int ticks;
+	/** Ticks until the panel is refreshed after logging in, once the player's name is known. */
+	private int refreshIn = -1;
+
+	/** The bank item being dragged, and the last place it was over. */
+	private int dragItem = -1;
+	private int dragIndex = -1;
+	private Widget dragOver;
 
 	@Provides
 	BankFrictionConfig provideConfig(ConfigManager configManager)
@@ -74,375 +116,383 @@ public class BankFrictionPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		BankFrictionSnapshot snapshot = BankFrictionStorage.deserialize(
-			configManager.getConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY));
-		analyser = new BankFrictionAnalyser(snapshot, config.maximumRetainedSessions());
-		overlay = new BankFrictionOverlay(config);
-		overlayManager.add(overlay);
-		panel = new BankFrictionPanel(this::selectRecommendation, this::clearHistory);
-		navigationButton = NavigationButton.builder()
+		ItemIcons icons = (itemId, onLoaded) ->
+		{
+			AsyncBufferedImage image = itemManager.getImage(itemId);
+			image.onLoaded(onLoaded);
+			return image;
+		};
+		panel = new FrictionPanel(icons, this::light, () -> clientThread.invokeLater(this::clearHistory));
+		navButton = NavigationButton.builder()
 			.tooltip("Bank Friction Analyser")
-			.icon(createIcon())
+			.icon(Sigil.icon(16))
 			.priority(7)
 			.panel(panel)
 			.build();
-		clientToolbar.addNavigation(navigationButton);
-
-		bankOpen = isBankOpen();
-		if (bankOpen && config.collectBehaviorData())
+		clientToolbar.addNavigation(navButton);
+		highlight.setEnabled(config.showPassiveHighlights());
+		overlayManager.add(highlight);
+		clientThread.invokeLater(() ->
 		{
-			startBankSession(System.currentTimeMillis());
-		}
-		refreshPanel();
+			loadProfile();
+			publish();
+		});
 	}
 
 	@Override
 	protected void shutDown()
 	{
-		recordPendingSearch(System.currentTimeMillis());
-		persist();
-		if (overlay != null)
+		overlayManager.remove(highlight);
+		highlight.setItems(null);
+		clientToolbar.removeNavigation(navButton);
+		clientThread.invokeLater(() ->
 		{
-			overlayManager.remove(overlay);
-		}
-		if (navigationButton != null)
-		{
-			clientToolbar.removeNavigation(navigationButton);
-		}
+			closeVisit();
+			save();
+			recorder = null;
+			profile = null;
+			bankOpen = false;
+			searching = false;
+		});
 		panel = null;
-		overlay = null;
-		navigationButton = null;
-		selectedRecommendation = null;
-		analyser = null;
-		bankOpen = false;
-		sessionActive = false;
 	}
 
 	@Subscribe
-	public void onMenuOptionClicked(MenuOptionClicked event)
+	public void onGameStateChanged(GameStateChanged event)
 	{
-		if (!config.collectBehaviorData() || analyser == null || !isBankOpen())
+		GameState state = event.getGameState();
+		if (state == GameState.LOGIN_SCREEN || state == GameState.HOPPING || state == GameState.CONNECTION_LOST)
+		{
+			closeVisit();
+			save();
+			publish();
+		}
+		else if (state == GameState.LOGGED_IN)
+		{
+			refreshIn = 2;
+		}
+	}
+
+	@Subscribe
+	public void onRuneScapeProfileChanged(RuneScapeProfileChanged event)
+	{
+		closeVisit();
+		save();
+		loadProfile();
+		publish();
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!BankFrictionConfig.GROUP.equals(event.getGroup()) || event.getKey().equals(JOURNAL_KEY))
 		{
 			return;
 		}
+		highlight.setEnabled(config.showPassiveHighlights());
+		clientThread.invokeLater(() ->
+		{
+			if (recorder != null)
+			{
+				recorder.setKeep(config.maximumRetainedSessions());
+				if (!config.collectBehaviorData())
+				{
+					closeVisit();
+				}
+			}
+			publish();
+		});
+	}
 
-		String option = clean(event.getMenuOption());
-		String target = clean(event.getMenuTarget());
-		String itemName = resolveItemName(event.getItemId(), target);
+	@Subscribe
+	public void onGameTick(GameTick tick)
+	{
+		if (recorder == null)
+		{
+			return;
+		}
+		ticks++;
+		if (refreshIn >= 0 && refreshIn-- == 0)
+		{
+			publish();
+		}
 		long now = System.currentTimeMillis();
+		boolean open = isBankOpen();
+		if (open && !bankOpen)
+		{
+			bankOpen = true;
+			if (config.collectBehaviorData())
+			{
+				recorder.open(now, client.getVarbitValue(VarbitID.BANK_CURRENTTAB));
+			}
+			publish();
+		}
+		else if (!open && bankOpen)
+		{
+			closeVisit();
+			publish();
+		}
+		else if (open && recorder.tick(now))
+		{
+			unsaved = true;
+			publish();
+		}
 
-		if (isWithdrawOption(option))
+		if (searching && !isSearching())
 		{
-			analyser.recordWithdraw(event.getItemId(), itemName, now);
-			recordInteraction(now);
+			searching = false;
+			recorder.endSearch(now);
 		}
-		else if (isDepositOption(option))
+		if (unsaved && ticks % SAVE_TICKS == 0)
 		{
-			analyser.recordDeposit(event.getItemId(), itemName, now);
-			recordInteraction(now);
+			save();
 		}
-		else if (isManualRepositionOption(option))
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (recorder != null && bankOpen && event.getVarbitId() == VarbitID.BANK_CURRENTTAB)
 		{
-			analyser.recordManualReposition(event.getItemId(), itemName, now);
-			recordInteraction(now);
-		}
-		else if (isTabSwitchOption(option, target))
-		{
-			analyser.recordTabSwitch(now);
-			recordInteraction(now);
+			recorder.tab(event.getValue(), System.currentTimeMillis());
 		}
 	}
 
 	@Subscribe
 	public void onVarClientStrChanged(VarClientStrChanged event)
 	{
-		if (!config.collectBehaviorData() || analyser == null || event.getIndex() != VarClientStr.INPUT_TEXT || !isBankOpen())
+		if (recorder == null || !bankOpen || event.getIndex() != VarClientID.MESLAYERINPUT || !isSearching())
 		{
 			return;
 		}
+		// The chat box input is shared with quantity prompts, so it only counts as a search while the bank's search is open.
+		searching = true;
+		recorder.searchText(client.getVarcStrValue(VarClientID.MESLAYERINPUT), System.currentTimeMillis());
+	}
 
-		String searchText = clean(client.getVarcStrValue(VarClientStr.INPUT_TEXT));
-		if (!searchText.isEmpty())
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event)
+	{
+		if (recorder == null || !recorder.isOpen())
 		{
-			pendingSearchText = searchText;
-			recordInteraction(System.currentTimeMillis());
+			return;
+		}
+		String option = event.getMenuOption();
+		if (option == null)
+		{
+			return;
+		}
+		int widgetId = event.getParam1();
+		long now = System.currentTimeMillis();
+		if (widgetId == InterfaceID.Bankmain.ITEMS && option.startsWith("Withdraw"))
+		{
+			int itemId = event.getItemId();
+			if (itemId <= 0)
+			{
+				return;
+			}
+			int row = -1;
+			boolean deep = false;
+			Widget container = client.getWidget(InterfaceID.Bankmain.ITEMS);
+			Widget slot = container == null ? null : container.getChild(event.getParam0());
+			if (slot != null)
+			{
+				row = slot.getRelativeY() / ROW_HEIGHT;
+				// Below the first screen of the bank, so it had to be scrolled to.
+				deep = slot.getRelativeY() + slot.getHeight() > container.getHeight();
+			}
+			recorder.withdraw(itemId, name(itemId), now, row, deep);
+		}
+		else if (widgetId == InterfaceID.Bankside.ITEMS && option.startsWith("Deposit"))
+		{
+			int itemId = event.getItemId();
+			if (itemId > 0)
+			{
+				int canonical = itemManager.canonicalize(itemId);
+				recorder.deposit(canonical, name(canonical), now);
+			}
 		}
 	}
 
 	@Subscribe
-	public void onGameTick(GameTick event)
+	public void onClientTick(ClientTick tick)
 	{
-		if (analyser == null)
+		if (recorder == null || !recorder.isOpen())
 		{
 			return;
 		}
-
-		long now = System.currentTimeMillis();
-		boolean currentlyBankOpen = isBankOpen();
-		if (currentlyBankOpen && !bankOpen && config.collectBehaviorData())
+		if (client.isDraggingWidget())
 		{
-			startBankSession(now);
-		}
-		else if (!currentlyBankOpen && bankOpen)
-		{
-			endBankSession(now);
-		}
-		bankOpen = currentlyBankOpen;
-
-		if (sessionActive && lastInteractionMillis > 0L && now - lastInteractionMillis > SESSION_IDLE_TIMEOUT_MILLIS)
-		{
-			recordPendingSearch(lastInteractionMillis);
-			analyser.recordSessionEnd(lastInteractionMillis);
-			sessionActive = false;
-			lastInteractionMillis = 0L;
-			refreshPanel();
-			persist();
-		}
-		else if (lastSaveMillis > 0L && now - lastSaveMillis > SAVE_INTERVAL_MILLIS)
-		{
-			persist();
-		}
-	}
-
-	private void startBankSession(long now)
-	{
-		if (!sessionActive)
-		{
-			analyser.recordSessionStart(now);
-			sessionActive = true;
-		}
-		lastInteractionMillis = now;
-	}
-
-	private void endBankSession(long now)
-	{
-		recordPendingSearch(now);
-		if (sessionActive)
-		{
-			analyser.recordSessionEnd(now);
-		}
-		sessionActive = false;
-		lastInteractionMillis = 0L;
-		refreshPanel();
-		persist();
-	}
-
-	private void recordInteraction(long now)
-	{
-		if (!sessionActive)
-		{
-			analyser.recordSessionStart(now);
-			sessionActive = true;
-		}
-		lastInteractionMillis = now;
-		if (lastSaveMillis == 0L)
-		{
-			lastSaveMillis = now;
-		}
-		refreshPanel();
-	}
-
-	private void recordPendingSearch(long now)
-	{
-		if (!pendingSearchText.isEmpty())
-		{
-			analyser.recordSearch(pendingSearchText, now);
-			pendingSearchText = "";
-		}
-	}
-
-	private void refreshPanel()
-	{
-		if (panel == null || analyser == null)
-		{
+			Widget dragged = client.getDraggedWidget();
+			if (dragged != null && dragged.getId() == InterfaceID.Bankmain.ITEMS && dragged.getItemId() > 0)
+			{
+				dragItem = dragged.getItemId();
+				dragIndex = dragged.getIndex();
+				Widget over = client.getDraggedOnWidget();
+				if (over != null)
+				{
+					dragOver = over;
+				}
+			}
 			return;
 		}
-
-		analyser.setMaxSessions(config.maximumRetainedSessions());
-		List<BankFrictionRecommendation> recommendations = analyser.buildRecommendations(System.currentTimeMillis());
-		selectedRecommendation = selectBestAvailableRecommendation(recommendations, selectedRecommendation);
-		panel.updateRecommendations(recommendations, selectedRecommendation, highlightStatus(selectedRecommendation));
-		updateOverlay();
-	}
-
-	private void persist()
-	{
-		if (analyser != null)
+		if (dragItem > 0)
 		{
-			configManager.setConfiguration(
-				BankFrictionConfig.GROUP,
-				STORAGE_KEY,
-				BankFrictionStorage.serialize(analyser.snapshot()));
-			lastSaveMillis = System.currentTimeMillis();
-		}
-	}
-
-	private void clearHistory()
-	{
-		configManager.unsetConfiguration(BankFrictionConfig.GROUP, STORAGE_KEY);
-		analyser = new BankFrictionAnalyser(new BankFrictionSnapshot(), config.maximumRetainedSessions());
-		selectedRecommendation = null;
-		pendingSearchText = "";
-		lastInteractionMillis = 0L;
-		lastSaveMillis = 0L;
-		sessionActive = false;
-		bankOpen = isBankOpen();
-		if (bankOpen && config.collectBehaviorData())
-		{
-			startBankSession(System.currentTimeMillis());
-		}
-		refreshPanel();
-	}
-
-	private void selectRecommendation(BankFrictionRecommendation recommendation)
-	{
-		selectedRecommendation = recommendation;
-		updateOverlay();
-	}
-
-	private void updateOverlay()
-	{
-		if (overlay == null)
-		{
-			return;
-		}
-
-		if (selectedRecommendation == null)
-		{
-			overlay.setHighlightedItemIds(Collections.emptyList());
-		}
-		else
-		{
-			overlay.setHighlightedItemIds(selectedRecommendation.getItemIds());
-		}
-	}
-
-	private String highlightStatus(BankFrictionRecommendation recommendation)
-	{
-		if (recommendation == null || recommendation.getItemIds().isEmpty())
-		{
-			return "";
-		}
-		if (!config.showPassiveHighlights())
-		{
-			return "Passive highlights are disabled in plugin settings.";
-		}
-		if (!bankOpen)
-		{
-			return "Open the bank to see passive item highlights.";
-		}
-		return "Visible matching bank items are highlighted when present.";
-	}
-
-	private String resolveItemName(int itemId, String fallback)
-	{
-		String cleanedFallback = clean(fallback);
-		if (itemId <= 0)
-		{
-			return cleanedFallback;
-		}
-
-		try
-		{
-			ItemComposition itemComposition = itemManager.getItemComposition(itemManager.canonicalize(itemId));
-			String name = clean(itemComposition.getName());
-			if (!name.isEmpty() && !name.equalsIgnoreCase("null"))
+			Widget over = dragOver;
+			boolean moved = over != null
+				&& (over.getId() == InterfaceID.Bankmain.ITEMS && over.getIndex() != dragIndex
+				|| over.getId() == InterfaceID.Bankmain.TABS);
+			if (moved)
 			{
-				return name;
+				recorder.rearrange(dragItem, name(dragItem), System.currentTimeMillis());
 			}
+			dragItem = -1;
+			dragIndex = -1;
+			dragOver = null;
 		}
-		catch (RuntimeException ignored)
-		{
-			return cleanedFallback;
-		}
-
-		return cleanedFallback;
-	}
-
-	private static BankFrictionRecommendation selectBestAvailableRecommendation(
-		List<BankFrictionRecommendation> recommendations,
-		BankFrictionRecommendation selectedRecommendation)
-	{
-		for (BankFrictionRecommendation recommendation : recommendations)
-		{
-			if (sameRecommendation(recommendation, selectedRecommendation))
-			{
-				return recommendation;
-			}
-		}
-
-		for (BankFrictionRecommendation recommendation : recommendations)
-		{
-			if (!recommendation.getItemIds().isEmpty())
-			{
-				return recommendation;
-			}
-		}
-
-		return null;
-	}
-
-	private static boolean sameRecommendation(
-		BankFrictionRecommendation left,
-		BankFrictionRecommendation right)
-	{
-		return left != null
-			&& right != null
-			&& left.getType() == right.getType()
-			&& left.getTitle().equals(right.getTitle())
-			&& left.getItemIds().equals(right.getItemIds());
-	}
-
-	private static boolean isWithdrawOption(String option)
-	{
-		return option.startsWith("Withdraw");
-	}
-
-	private static boolean isDepositOption(String option)
-	{
-		return option.startsWith("Deposit");
 	}
 
 	private boolean isBankOpen()
 	{
-		Widget bank = client.getWidget(InterfaceID.BANK, 1);
-		return bank != null && !bank.isHidden();
+		Widget items = client.getWidget(InterfaceID.Bankmain.ITEMS);
+		return items != null && !items.isHidden();
 	}
 
-	private static boolean isManualRepositionOption(String option)
+	private boolean isSearching()
 	{
-		return option.equals("Swap") || option.equals("Insert");
+		return client.getVarcIntValue(VarClientID.MESLAYERMODE) == InputType.SEARCH.getType();
 	}
 
-	private static boolean isTabSwitchOption(String option, String target)
+	private String name(int itemId)
 	{
-		String lowerOption = option.toLowerCase();
-		String lowerTarget = target.toLowerCase();
-		return (lowerOption.contains("tab") || lowerTarget.contains("tab")) && lowerTarget.contains("bank");
+		ItemComposition composition = itemManager.getItemComposition(itemId);
+		return composition == null ? null : composition.getName();
 	}
 
-	private static String clean(String text)
+	private void closeVisit()
 	{
-		if (text == null)
+		bankOpen = false;
+		searching = false;
+		dragItem = -1;
+		dragOver = null;
+		if (recorder != null && recorder.close(System.currentTimeMillis()))
 		{
-			return "";
+			unsaved = true;
 		}
-		return text.replaceAll("<[^>]*>", "").replace('\u00a0', ' ').trim();
 	}
 
-	private static BufferedImage createIcon()
+	private void loadProfile()
 	{
-		BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
-		Graphics2D graphics = image.createGraphics();
-		graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-		graphics.setColor(new Color(36, 32, 27));
-		graphics.fillRoundRect(1, 1, 14, 14, 4, 4);
-		graphics.setColor(new Color(255, 152, 0));
-		graphics.drawRoundRect(1, 1, 13, 13, 4, 4);
-		graphics.fillOval(4, 4, 3, 3);
-		graphics.fillOval(9, 4, 3, 3);
-		graphics.fillRect(4, 10, 8, 2);
-		graphics.dispose();
-		return image;
+		profile = configManager.getRSProfileKey();
+		recorder = null;
+		if (profile == null)
+		{
+			return;
+		}
+		Journal journal = null;
+		try
+		{
+			String saved = configManager.getRSProfileConfiguration(BankFrictionConfig.GROUP, JOURNAL_KEY);
+			if (saved != null && !saved.isEmpty())
+			{
+				Journal read = gson.fromJson(saved, Journal.class);
+				journal = read == null ? null : read.repair();
+			}
+		}
+		catch (JsonParseException e)
+		{
+			log.warn("Could not read the saved bank visits, starting afresh", e);
+		}
+		unsaved = false;
+		if (journal == null)
+		{
+			journal = Legacy.read(configManager.getConfiguration(BankFrictionConfig.GROUP, LEGACY_KEY));
+			if (journal != null)
+			{
+				// The first version kept one history for every account; it moves to the first account that logs in.
+				unsaved = true;
+			}
+		}
+		if (journal == null)
+		{
+			journal = new Journal();
+		}
+		recorder = new Recorder(journal, config.maximumRetainedSessions());
+		journal.trim(config.maximumRetainedSessions());
+		if (unsaved)
+		{
+			save();
+			configManager.unsetConfiguration(BankFrictionConfig.GROUP, LEGACY_KEY);
+		}
+	}
+
+	private void save()
+	{
+		if (profile == null || recorder == null || !unsaved)
+		{
+			return;
+		}
+		unsaved = false;
+		configManager.setConfiguration(BankFrictionConfig.GROUP, profile, JOURNAL_KEY, gson.toJson(recorder.getJournal()));
+	}
+
+	private void clearHistory()
+	{
+		if (recorder == null)
+		{
+			return;
+		}
+		Journal journal = recorder.getJournal();
+		journal.getVisits().clear();
+		journal.getNames().clear();
+		boolean open = recorder.isOpen();
+		recorder = new Recorder(journal, config.maximumRetainedSessions());
+		if (open && config.collectBehaviorData())
+		{
+			recorder.open(System.currentTimeMillis(), client.getVarbitValue(VarbitID.BANK_CURRENTTAB));
+		}
+		unsaved = true;
+		save();
+		publish();
+	}
+
+	/** Called from the panel on the Swing thread with what to ring in the bank. */
+	private void light(String title, List<Integer> items)
+	{
+		List<Integer> copy = new ArrayList<>(items);
+		clientThread.invokeLater(() ->
+		{
+			// Ring an item's placeholder too, so it can be found when every one is in the inventory.
+			Set<Integer> ids = new HashSet<>();
+			for (int id : copy)
+			{
+				ids.add(id);
+				ItemComposition composition = itemManager.getItemComposition(id);
+				if (composition != null && composition.getPlaceholderId() > 0)
+				{
+					ids.add(composition.getPlaceholderId());
+				}
+			}
+			highlight.setItems(ids);
+		});
+	}
+
+	/** Works the report out on the client thread and hands it to the panel. */
+	private void publish()
+	{
+		FrictionPanel target = panel;
+		if (target == null)
+		{
+			return;
+		}
+		boolean loggedIn = client.getGameState() == GameState.LOGGED_IN;
+		Report report = recorder == null ? Report.EMPTY : Analysis.of(recorder.getJournal());
+		Player player = client.getLocalPlayer();
+		String name = loggedIn && player != null ? player.getName() : null;
+		FrictionPanel.State state = !loggedIn ? FrictionPanel.State.LOGGED_OUT
+			: config.collectBehaviorData() ? FrictionPanel.State.READY : FrictionPanel.State.PAUSED;
+		boolean open = bankOpen;
+		long now = System.currentTimeMillis();
+		SwingUtilities.invokeLater(() -> target.update(report, name, state, open, now));
 	}
 }

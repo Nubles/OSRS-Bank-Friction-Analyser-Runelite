@@ -12,8 +12,8 @@ public interface BankFrictionConfig extends Config
 
 	@ConfigItem(
 		keyName = "collectBehaviorData",
-		name = "Analyse bank behavior",
-		description = "Collect local bank interaction data to build organization recommendations. No data is sent anywhere.",
+		name = "Watch bank visits",
+		description = "Remember what you do at the bank to find what slows you down. It is kept in your RuneLite profile and never sent anywhere.",
 		position = 0
 	)
 	default boolean collectBehaviorData()
@@ -23,8 +23,8 @@ public interface BankFrictionConfig extends Config
 
 	@ConfigItem(
 		keyName = "showPassiveHighlights",
-		name = "Show passive highlights",
-		description = "Highlight visible bank items related to the selected recommendation. This never clicks or moves items.",
+		name = "Light up items",
+		description = "Ring the bank items of the advice, loadout or visit you click in the panel. Nothing is clicked or moved for you.",
 		position = 1
 	)
 	default boolean showPassiveHighlights()
@@ -33,17 +33,17 @@ public interface BankFrictionConfig extends Config
 	}
 
 	@Range(
-		min = 10,
-		max = 250
+		min = 20,
+		max = 300
 	)
 	@ConfigItem(
 		keyName = "maximumRetainedSessions",
-		name = "Retained sessions",
-		description = "Maximum number of local bank sessions to retain for recommendations.",
+		name = "Visits remembered",
+		description = "How many bank visits to remember per account. More gives steadier advice; fewer reacts faster to a new layout.",
 		position = 2
 	)
 	default int maximumRetainedSessions()
 	{
-		return 75;
+		return 150;
 	}
 }
